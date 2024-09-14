@@ -1,0 +1,291 @@
+#!/usr/bin/env ruby
+##
+# Article publisher for my jekyll blog
+# - moves an article from _drafts to _posts
+# - and ensures a minimum of front matter is correct
+##
+# In the future, might have it run the git checkin too
+
+########################
+# constants & defaults #
+$VERSION = "0.1a".freeze
+DEFAULT_YAML = {
+    "layout"     => "wp-post",
+    "status"     => "publish",
+    "author"     => {
+        "display_name" => "Fr. Matt",
+        "login" => "mattsiegman",
+    },
+    "categories" => [],
+    "tags"       => [],
+}
+
+# from jekyll
+YAML_FRONT_MATTER_REGEXP = %r!\A(---\s*\n.*?\n?)^((---|\.\.\.)\s*$\n?)!m.freeze
+
+##################
+# module imports #
+require 'safe_yaml/load'
+#require 'kramdown'
+require 'date'
+require 'pathname'
+require 'htmlentities'
+
+######
+# subs
+def get_directory_info
+    current_path = Pathname.pwd
+
+    base_path, current_dir = current_path.split
+
+    jekyll_dir = current_path
+    destination_dir = current_path
+
+    if current_path.join("_posts").directory?
+        # in the jekyll directory
+        destination_dir = current_path + "_posts"
+    elsif base_path.join("_posts").directory?
+        # in a subdirectory of jekyll
+        jekyll_dir = base_path
+        destination_dir = base_path + "_posts"
+    end
+
+    {
+        jekyll: jekyll_dir,
+        current: current_path,
+        destination: destination_dir,
+    }
+end
+
+def get_cli_draft_paths(directory_info)
+    files = ARGV
+
+    if files.length < 1
+        fail "filename(s) required as argument"
+    end
+
+    output = []
+    errors = []
+    files.each do |file|
+        file_path = Pathname.new(file)
+        unless file_path.exist? and file_path.file?
+            errors << "File must exist: #{file_path.to_s}"
+            next
+        end
+
+        pn = directory_info[:current] + file_path
+        dir, basename = pn.split
+        if dir.to_s =~ /^#{Regexp.quote(directory_info[:destination].to_s)}/
+            errors << "#{file_path.to_s} is already posted."
+            next
+        end
+
+        output << file_path
+    end
+
+    if errors.length > 0
+        puts errors.join("\n")
+        fail "Cannot continue..."
+    end
+
+    output
+end
+
+def get_file_data(filename) 
+    file_data = {
+        name: filename,
+        content: "",
+        data: {},
+    }
+
+    file_data[:content] = File.read(filename)
+
+    # stole this from jekyll -- how they extract the Front Matter
+    if file_data[:content] =~ YAML_FRONT_MATTER_REGEXP
+        file_data[:content] = Regexp.last_match.post_match
+        file_data[:data] = SafeYAML.load(Regexp.last_match(1))
+    end
+
+    # clean ^M from windows files
+    file_data[:content].delete!("\cM")
+
+    file_data[:data] ||= {}
+    
+    file_data
+end
+
+def print_preview(doc)
+    preview = ""
+
+#    if doc[:name] =~ /\.(md|html)$/
+#        preview = Kramdown::Document.new(doc[:content]).to_latex
+#    else
+        preview = doc[:content][0..240]
+#    end
+
+    puts "This is a quick preview of your file:"
+    puts preview
+end
+
+def make_nice_name(name)
+    name.gsub(/[^A-Za-z0-9]/, ' ')
+end
+
+def get_var_from_input(item_name, current, required = false)
+    rval = nil
+    nice_name = make_nice_name(item_name).capitalize
+
+    until rval
+        unless current[item_name] and current[item_name] != ""
+            print "#{nice_name} for post: "
+        else
+            print "#{nice_name} for post [#{current[item_name]}]:"
+        end
+
+        input = STDIN.gets.strip
+        rval = current[item_name].to_s
+        if input != ""
+            rval = input
+        end
+
+        if required and (rval == "" or not rval)
+            rval = nil
+            puts "#{nice_name} is required."
+        end
+    end
+
+    rval
+end
+
+def get_array_from_input(item_name, current)
+    items = []
+    items_cleaned = []
+
+    unless current[item_name].length > 0
+        puts "Post #{item_name}, seperated by ';': "
+        items = STDIN.gets.chomp.split(/;/)
+    else
+        puts "Post #{item_name}, seperated by ';' [#{current[item_name]}]: "
+        items = STDIN.gets.chomp.split(/;/)
+        unless items.length > 0
+            items_cleaned = current[item_name]
+        end
+    end
+
+    html_encoder = HTMLEntities.new
+    items.each do |item|
+        item.strip!
+        next if item == ""
+        items_cleaned.push(html_encoder.encode(item))
+    end
+
+    items_cleaned
+end
+
+def fill_front_matter(doc, default)
+    new_front_matter = default.dup
+
+    doc[:data].keys.each do |k|
+        new_front_matter[k] = doc[:data][k]
+    end
+
+    new_front_matter['title'] = get_var_from_input("title", new_front_matter, true)
+    new_front_matter["categories"] = get_array_from_input("categories", new_front_matter)
+    new_front_matter["tags"] = get_array_from_input("tags", new_front_matter)
+    new_front_matter['author']['display_name'] = get_var_from_input("display_name", new_front_matter['author'])
+    new_front_matter['author']['login'] = get_var_from_input("login", new_front_matter['author'])
+
+    working_date = nil
+
+    until working_date
+        working_date = new_front_matter["date"]
+
+        if !working_date and doc[:name] =~ /(?<date>\d{4}-\d{2}-\d{2})/
+            working_date = Regexp.last_match(:date).strip
+        end
+        
+        working_date = get_var_from_input("date", {"date" => working_date})
+        
+        begin
+            new_front_matter["date"] = Date.parse(working_date)
+        rescue ArgumentError
+            working_date = nil
+            new_front_matter["date"] = nil
+            puts "Invalid date format."
+        end
+    end
+
+    new_front_matter
+end
+
+def generate_filename(doc)
+    date_string = doc[:data]["date"].strftime('%Y-%m-%d')
+    title_string = doc[:data]["title"].gsub(/[^\w\-]+/, '-')
+    extension = "md"
+    if doc[:name] =~ /\.(?<ext>\w+)$/
+        extension = Regexp.last_match(:ext)
+    end
+
+    "#{date_string}-#{title_string}.#{extension}".downcase
+end
+
+def trim_date_line(doc)
+    content = doc[:content]
+    if content =~ /^(?<front_lines>\W*#{Regexp.quote(doc[:data]["date"].strftime('%Y-%m-%d'))})\s+/m
+        print "Remove front lines [#{Regexp.last_match(:front_lines)}] (y/[n])? "
+        answer = STDIN.gets.chomp
+        if answer == "y" or answer == "yes"
+            content = Regexp.last_match.post_match
+        end
+    end
+
+    content
+end
+
+###############################
+# main program logic lives here
+def main
+    puts "Article Publisher v#{$VERSION}"
+
+    # note: directory_info is a bunch of Pathname objects
+    directory_info = get_directory_info
+    # so are the file paths
+    files = get_cli_draft_paths(directory_info)
+
+    files.each do |file_path|
+        print "Reading file: #{file_path.to_s}\n"
+        
+        doc = get_file_data(file_path.to_s)
+
+        print_preview(doc)
+
+        doc[:data] = fill_front_matter(doc, DEFAULT_YAML)
+
+        new_file_path = directory_info[:destination] + generate_filename(doc)
+
+        if new_file_path.exist?
+            puts "#{new_file_name} already exists... skipping"
+            next
+        end
+
+        doc[:content] = trim_date_line(doc)
+
+        print "generating new post at: #{new_file_path.to_s}... "
+        new_file_path.open("w") do |f|
+            f.puts doc[:data].to_yaml
+            f.puts "---"
+            f.puts doc[:content]
+        end
+        puts "done"
+
+        print "deleting draft at: #{file_path.to_s}... "
+        file_path.delete
+        puts "done"
+    end
+
+    puts "\n\nThanks for playing!"
+end
+
+###
+
+main
