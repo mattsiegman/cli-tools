@@ -1,0 +1,105 @@
+#!/usr/bin/env ruby
+##
+# Tool to help move wordpress podcasts made with simple podcast 
+# to my jekyll blog
+# - scrapes data from wp_postmeta and adds it to the front matter
+##
+# In the future, might have it run the git checkin too
+
+########################
+# constants & defaults #
+$VERSION = "0.1a".freeze
+
+## gems and such
+require "mysql2"
+
+## local libraries
+$LOAD_PATH.unshift __dir__
+require "tools/cli.rb"
+require "tools/jekyll.rb"
+require "tools/secrets.rb"
+
+include CLITools
+include JekyllTools
+
+###############################
+# main program logic lives here
+def main
+    puts "Article Publisher v#{$VERSION}"
+
+    # note: directory_info is a bunch of Pathname objects
+    directory_info = get_directory_info
+    # so are the file paths
+    files = get_cli_draft_paths(directory_info)
+
+    database = Mysql2::Client.new( Secrets::WordpressDatabase )
+
+    db_statement = database.prepare("select * from wp_postmeta where post_id = ?")
+
+    files.each do |file_path|
+        print "Reading file: #{file_path.to_s}\n"
+        
+        doc = get_file_data(file_path.to_s)
+
+        print_preview(doc)
+
+        # collect the metadata from wordpress and smash it into the "wp_meta" item
+        results = db_statement.execute(doc[:data]["wordpress_id"], :symbolize_keys => true)
+
+        doc[:data]["wp_meta"] = {}
+        results.each do |row|
+          if doc[:data]["wp_meta"].key?(row[:meta_key])
+            if doc[:data]["wp_meta"][row[:meta_key]].respond_to?('push')
+              doc[:data]["wp_meta"][row[:meta_key]].push(row[:meta_value])
+            else 
+              new_value = [doc[:data]["wp_meta"][row[:meta_key]], row[:meta_value]]
+              doc[:data]["wp_meta"][row[:meta_key]] = new_value
+            end
+          else
+            doc[:data]["wp_meta"][row[:meta_key]] = row[:meta_value]
+          end
+        end
+
+        # wordpress & simple podcast thing used wordpres links as guids... weird
+        if doc[:data].key?("wordpress_url")
+          doc[:data]["podcast_guid"] = doc[:data]["wordpress_url"]
+        end
+
+        puts doc[:data]
+    # die early while writing new code
+    exit
+
+    ## TODO:
+    # figure our where to store these things
+    # crap out the new post file
+    # remove the old file
+        doc[:data] = fill_front_matter(doc, DEFAULT_YAML)
+
+        new_file_path = directory_info[:destination] + generate_filename(doc)
+
+        if new_file_path.exist?
+            puts "#{new_file_name} already exists... skipping"
+            next
+        end
+
+        doc[:content] = trim_date_line(doc)
+
+        print "generating new post at: #{new_file_path.to_s}... "
+        new_file_path.open("w") do |f|
+            f.puts doc[:data].to_yaml
+            f.puts "---"
+            f.puts doc[:content]
+        end
+        puts "done"
+
+        print "deleting draft at: #{file_path.to_s}... "
+        file_path.delete
+        puts "done"
+    end
+
+    puts "\n\nThanks for playing!"
+end
+
+###
+
+main
