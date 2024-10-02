@@ -65,6 +65,16 @@ def main
         doc[:data]["podcast_guid"] = doc[:data]["wordpress_url"]
       end
 
+      if doc[:data].key?("categories")
+        doc[:data]["categories"] << "podcast"
+      else
+        doc[:data]["categories"] = ["podcast"]
+      end
+
+      # remove stupid wordpress paragraphs element things, then squeeze the lines together
+      doc[:content].gsub!(/^.*wp:paragraph.*$/, "")
+      doc[:content].squeeze!("\n")
+
       print "regenerating... "
       file_path.open("w") do |f|
           f.puts doc[:data].to_yaml
